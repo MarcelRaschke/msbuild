@@ -4,29 +4,32 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Build.Execution;
 using Microsoft.Build.Experimental.BuildCheck;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Shared;
 using Microsoft.Build.UnitTests;
+using Microsoft.Build.Utilities;
 using Shouldly;
 using Xunit;
+using Xunit.Abstractions;
 using static Microsoft.Build.Experimental.BuildCheck.Infrastructure.BuildCheckManagerProvider;
 
 namespace Microsoft.Build.BuildCheck.UnitTests
 {
-    public class TaskInvocationAnalysisDataTests : IDisposable
+    public class TaskInvocationCheckDataTests : IDisposable
     {
-        internal sealed class TestAnalyzer : BuildAnalyzer
+        internal sealed class TestCheck : Check
         {
-            #region BuildAnalyzer initialization
+            #region Check initialization
 
-            public static BuildAnalyzerRule SupportedRule = new BuildAnalyzerRule("BC0000", "TestRule", "TestDescription", "TestMessage",
-                new BuildAnalyzerConfiguration() { Severity = BuildAnalyzerResultSeverity.Warning, IsEnabled = true });
+            public static CheckRule SupportedRule = new CheckRule("BC0000", "TestRule", "TestDescription", "TestMessage",
+                new CheckConfiguration() { Severity = CheckResultSeverity.Warning });
 
-            public override string FriendlyName => "MSBuild.TestAnalyzer";
+            public override string FriendlyName => "MSBuild.TestCheck";
 
-            public override IReadOnlyList<BuildAnalyzerRule> SupportedRules { get; } = [SupportedRule];
+            public override IReadOnlyList<CheckRule> SupportedRules { get; } = [SupportedRule];
 
             public override void Initialize(ConfigurationContext configurationContext)
             { }
@@ -41,29 +44,33 @@ namespace Microsoft.Build.BuildCheck.UnitTests
             /// <summary>
             /// Stores all TaskInvocationAnalysisData reported during the build.
             /// </summary>
-            public List<TaskInvocationAnalysisData> AnalysisData = new();
+            public List<TaskInvocationCheckData> CheckData = new();
 
-            private void TaskInvocationAction(BuildCheckDataContext<TaskInvocationAnalysisData> context)
+            private void TaskInvocationAction(BuildCheckDataContext<TaskInvocationCheckData> context)
             {
-                AnalysisData.Add(context.Data);
+                CheckData.Add(context.Data);
             }
         }
 
-        private static TestAnalyzer? s_testAnalyzer;
+        private ITestOutputHelper _output;
 
-        public TaskInvocationAnalysisDataTests()
+        private static TestCheck? s_testCheck;
+
+        public TaskInvocationCheckDataTests(ITestOutputHelper output)
         {
+            _output = output;
+
             BuildCheckManager.s_testFactoriesPerDataSource =
             [
                 // BuildCheckDataSource.EventArgs
                 [
-                    ([TestAnalyzer.SupportedRule.Id], true, () => (s_testAnalyzer = new TestAnalyzer())),
+                    new ([TestCheck.SupportedRule.Id], true, () => s_testCheck = new TestCheck()),
                 ],
                 // BuildCheckDataSource.Execution
                 [],
             ];
 
-            s_testAnalyzer?.AnalysisData.Clear();
+            s_testCheck?.CheckData.Clear();
         }
 
         public void Dispose()
@@ -73,15 +80,16 @@ namespace Microsoft.Build.BuildCheck.UnitTests
 
         private void BuildProject(string taskInvocation)
         {
-            using (var env = TestEnvironment.Create())
+            using (var env = TestEnvironment.Create(_output))
             {
                 var testProject = env.CreateTestProjectWithFiles($"<Project><Target Name=\"Build\">{taskInvocation}</Target></Project>");
 
                 using (var buildManager = new BuildManager())
                 {
-                    var request = new BuildRequestData(testProject.ProjectFile, new Dictionary<string, string>(), MSBuildConstants.CurrentToolsVersion, [], null, BuildRequestDataFlags.None);
+                    var request = new BuildRequestData(testProject.ProjectFile, new Dictionary<string, string?>(), MSBuildConstants.CurrentToolsVersion, [], null, BuildRequestDataFlags.None);
                     var parameters = new BuildParameters
                     {
+                        Loggers = [new MockLogger(_output)],
                         LogTaskInputs = true,
                         IsBuildCheckEnabled = true,
                         ShutdownInProcNodeOnBuildFinish = true,
@@ -92,7 +100,7 @@ namespace Microsoft.Build.BuildCheck.UnitTests
                     result.OverallResult.ShouldBe(BuildResultCode.Success);
                 }
 
-                foreach (var data in s_testAnalyzer!.AnalysisData)
+                foreach (var data in s_testCheck.ShouldNotBeNull().CheckData)
                 {
                     data.ProjectFilePath.ShouldBe(testProject.ProjectFile);
                     data.TaskInvocationLocation.Line.ShouldBeGreaterThan(0);
@@ -106,8 +114,8 @@ namespace Microsoft.Build.BuildCheck.UnitTests
         {
             BuildProject("<Message Text='Hello'/>");
 
-            s_testAnalyzer!.AnalysisData.Count.ShouldBe(1);
-            var data = s_testAnalyzer.AnalysisData[0];
+            s_testCheck!.CheckData.Count.ShouldBe(1);
+            var data = s_testCheck.CheckData[0];
             data.TaskName.ShouldBe("Message");
             data.Parameters.Count.ShouldBe(1);
             data.Parameters["Text"].IsOutput.ShouldBe(false);
@@ -128,8 +136,8 @@ namespace Microsoft.Build.BuildCheck.UnitTests
                 </CombinePath>
             """);
 
-            s_testAnalyzer!.AnalysisData.Count.ShouldBe(1);
-            var data = s_testAnalyzer.AnalysisData[0];
+            s_testCheck!.CheckData.Count.ShouldBe(1);
+            var data = s_testCheck.CheckData[0];
             data.TaskName.ShouldBe("CombinePath");
             data.Parameters.Count.ShouldBe(3);
 
@@ -143,6 +151,37 @@ namespace Microsoft.Build.BuildCheck.UnitTests
             ((ITaskItem)listValue[1]!).ItemSpec.ShouldBe("item2");
             data.Parameters["CombinedPaths"].IsOutput.ShouldBe(true);
             data.Parameters["CombinedPaths"].Value.ShouldNotBeNull();
+        }
+
+        [Fact]
+        public void TaskParameterEnumeratesValues()
+        {
+            var parameter1 = MakeParameter("string");
+            parameter1.EnumerateValues().SequenceEqual(["string"]).ShouldBeTrue();
+            parameter1.EnumerateStringValues().SequenceEqual(["string"]).ShouldBeTrue();
+
+            var parameter2 = MakeParameter(true);
+            parameter2.EnumerateValues().SequenceEqual([true]);
+            parameter2.EnumerateStringValues().SequenceEqual(["True"]).ShouldBeTrue();
+
+            var item1 = new TaskItem("item1");
+            var parameter3 = MakeParameter(item1);
+            parameter3.EnumerateValues().SequenceEqual([item1]).ShouldBeTrue();
+            parameter3.EnumerateStringValues().SequenceEqual(["item1"]).ShouldBeTrue();
+
+            var array1 = new object[] { "string1", "string2" };
+            var parameter4 = MakeParameter(array1);
+            parameter4.EnumerateValues().SequenceEqual(array1).ShouldBeTrue();
+            parameter4.EnumerateStringValues().SequenceEqual(array1).ShouldBeTrue();
+
+            var item2 = new TaskItem("item2");
+            var array2 = new ITaskItem[] { item1, item2 };
+            var parameter5 = MakeParameter(array2);
+            parameter5.EnumerateValues().SequenceEqual(array2).ShouldBeTrue();
+            parameter5.EnumerateStringValues().SequenceEqual(["item1", "item2"]).ShouldBeTrue();
+
+            static TaskInvocationCheckData.TaskParameter MakeParameter(object value)
+                => new TaskInvocationCheckData.TaskParameter(value, IsOutput: false);
         }
     }
 }

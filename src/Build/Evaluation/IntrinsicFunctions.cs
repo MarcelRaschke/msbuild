@@ -31,13 +31,33 @@ namespace Microsoft.Build.Evaluation
     /// The Intrinsic class provides static methods that can be accessed from MSBuild's
     /// property functions using $([MSBuild]::Function(x,y)).
     /// </summary>
-    internal static class IntrinsicFunctions
+    internal static partial class IntrinsicFunctions
     {
+        // lang=regex
+        private const string RegistrySdkSpecification = @"^HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Microsoft SDKs\\Windows\\v(\d+\.\d+)$";
+
 #pragma warning disable CA1416 // Platform compatibility: we'll only use this on Windows
-        private static readonly object[] DefaultRegistryViews = new object[] { RegistryView.Default };
+        private static readonly object[] DefaultRegistryViews = [RegistryView.Default];
 #pragma warning restore CA1416
 
-        private static readonly Lazy<Regex> RegistrySdkRegex = new Lazy<Regex>(() => new Regex(@"^HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Microsoft SDKs\\Windows\\v(\d+\.\d+)$", RegexOptions.IgnoreCase));
+#if NET7_0_OR_GREATER
+        [GeneratedRegex(RegistrySdkSpecification, RegexOptions.IgnoreCase)]
+        private static partial Regex RegistrySdkPattern();
+#else
+        private static readonly Lazy<Regex> RegistrySdkPattern = new Lazy<Regex>(() => new Regex(RegistrySdkSpecification, RegexOptions.IgnoreCase));
+#endif
+
+        private static Regex RegistrySdkRegex
+        {
+            get
+            {
+#if NET7_0_OR_GREATER
+                return RegistrySdkPattern();
+#else
+                return RegistrySdkPattern.Value;
+#endif
+            }
+        }
 
         private static readonly Lazy<NuGetFrameworkWrapper> NuGetFramework = new Lazy<NuGetFrameworkWrapper>(() => NuGetFrameworkWrapper.CreateInstance());
 
@@ -191,9 +211,8 @@ namespace Microsoft.Build.Evaluation
         {
 #if RUNTIME_TYPE_NETCORE
             // .NET Core MSBuild used to always return empty, so match that behavior
-            // on non-Windows (no registry), and with a changewave (in case someone
-            // had a registry property and it breaks when it lights up).
-            if (!NativeMethodsShared.IsWindows || !ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave17_4))
+            // on non-Windows (no registry).
+            if (!NativeMethodsShared.IsWindows)
             {
                 return null;
             }
@@ -208,9 +227,8 @@ namespace Microsoft.Build.Evaluation
         {
 #if RUNTIME_TYPE_NETCORE
             // .NET Core MSBuild used to always return empty, so match that behavior
-            // on non-Windows (no registry), and with a changewave (in case someone
-            // had a registry property and it breaks when it lights up).
-            if (!NativeMethodsShared.IsWindows || !ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave17_4))
+            // on non-Windows (no registry).
+            if (!NativeMethodsShared.IsWindows)
             {
                 return defaultValue;
             }
@@ -222,9 +240,8 @@ namespace Microsoft.Build.Evaluation
         {
 #if RUNTIME_TYPE_NETCORE
             // .NET Core MSBuild used to always return empty, so match that behavior
-            // on non-Windows (no registry), and with a changewave (in case someone
-            // had a registry property and it breaks when it lights up).
-            if (!NativeMethodsShared.IsWindows || !ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave17_4))
+            // on non-Windows (no registry).
+            if (!NativeMethodsShared.IsWindows)
             {
                 return defaultValue;
             }
@@ -245,9 +262,8 @@ namespace Microsoft.Build.Evaluation
         {
 #if RUNTIME_TYPE_NETCORE
             // .NET Core MSBuild used to always return empty, so match that behavior
-            // on non-Windows (no registry), and with a changewave (in case someone
-            // had a registry property and it breaks when it lights up).
-            if (!NativeMethodsShared.IsWindows || !ChangeWaves.AreFeaturesEnabled(ChangeWaves.Wave17_4))
+            // on non-Windows (no registry).
+            if (!NativeMethodsShared.IsWindows)
             {
                 return defaultValue;
             }
@@ -283,7 +299,7 @@ namespace Microsoft.Build.Evaluation
                         // Fake common requests to HKLM that we can resolve
 
                         // See if this asks for a specific SDK
-                        var m = RegistrySdkRegex.Value.Match(keyName);
+                        var m = RegistrySdkRegex.Match(keyName);
 
                         if (m.Success && m.Groups.Count >= 1 && valueName.Equals("InstallRoot", StringComparison.OrdinalIgnoreCase))
                         {
@@ -697,17 +713,17 @@ namespace Microsoft.Build.Evaluation
 
         public static bool IsRunningFromVisualStudio() => BuildEnvironmentHelper.Instance.Mode == BuildEnvironmentMode.VisualStudio;
 
-        public static bool RegisterBuildCheck(string pathToAssembly, LoggingContext loggingContext)
+        public static bool RegisterBuildCheck(string projectPath, string pathToAssembly, LoggingContext loggingContext)
         {
             pathToAssembly = FileUtilities.GetFullPathNoThrow(pathToAssembly);
             if (File.Exists(pathToAssembly))
             {
-                loggingContext.LogBuildEvent(new BuildCheckAcquisitionEventArgs(pathToAssembly));
+                loggingContext.LogBuildEvent(new BuildCheckAcquisitionEventArgs(pathToAssembly, projectPath));
 
                 return true;
             }
 
-            loggingContext.LogComment(MessageImportance.Low, "CustomAnalyzerAssemblyNotExist", pathToAssembly);
+            loggingContext.LogComment(MessageImportance.Low, "CustomCheckAssemblyNotExist", pathToAssembly);
 
             return false;
         }
